@@ -37,14 +37,10 @@ gates both skill discovery and the `using-superpowers` bootstrap injection.
 
 ## Install
 
+GitHub install (recommended):
+
 ```bash
 pi install git:github.com/JulianS-Uni/toggle-superpowers
-```
-
-or, once published to npm:
-
-```bash
-pi install npm:toggle-superpowers
 ```
 
 For local development, load the checkout directly:

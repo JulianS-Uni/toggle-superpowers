@@ -19,6 +19,9 @@
       "./extensions/toggle-superpowers.ts"
     ]
   },
+  "files": [
+    "extensions/toggle-superpowers.ts"
+  ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
