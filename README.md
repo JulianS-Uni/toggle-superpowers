@@ -32,7 +32,7 @@ gates both skill discovery and the `using-superpowers` bootstrap injection.
 ## Install
 
 ```bash
-pi install git:github.com/kluk/toogle-superpowers
+pi install git:github.com/JulianS-Uni/toogle-superpowers
 ```
 
 or, once published to npm:

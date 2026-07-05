@@ -12,7 +12,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kluk/toogle-superpowers.git"
+    "url": "git+https://github.com/JulianS-Uni/toogle-superpowers.git"
   },
   "pi": {
     "extensions": [
