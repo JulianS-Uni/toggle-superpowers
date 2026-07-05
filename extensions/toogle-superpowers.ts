@@ -11,11 +11,15 @@
 //   use (into ~/.pi/agent/toogle-superpowers/superpowers), enables the flag,
 //   persists that decision into the session, and reloads resources so the
 //   skills get discovered.
+// - The clone is a sparse checkout (skills/ only, blob:none partial clone)
+//   pinned to the latest release tag (vX.Y.Z) instead of main.
+// - When a newer release is published, the extension notifies (at most once
+//   per 24h, non-blocking) that `/superpowers update` can upgrade the skills.
 // - There is deliberately no off-switch: the flag persists for the lifetime
 //   of the session (it survives /reload and /resume via a session entry) and
 //   resets to false only when a new session starts (/new).
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type {
@@ -32,6 +36,8 @@ const BOOTSTRAP_MARKER = "superpowers:using-superpowers bootstrap for pi";
 const cloneDir = join(getAgentDir(), "toogle-superpowers", "superpowers");
 const skillsDir = join(cloneDir, "skills");
 const bootstrapSkillPath = join(skillsDir, "using-superpowers", "SKILL.md");
+const updateStampPath = join(getAgentDir(), "toogle-superpowers", "last-update-check");
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 let cachedBootstrap: string | undefined;
 
@@ -52,6 +58,10 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 		superpowersEnabled = readEnabledFromSession(ctx);
 		injectBootstrap = true;
 		updateStatus(ctx);
+		if (superpowersEnabled && cloneExists()) {
+			// Non-blocking release check; notifies when an update is available.
+			void checkForNewRelease(ctx);
+		}
 	});
 
 	// --- skill discovery (guarded) -------------------------------------------
@@ -103,7 +113,7 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 			"Enable superpowers skills + bootstrap for this session (resets with /new)",
 		getArgumentCompletions: (prefix: string) => {
 			const items = [
-				{ value: "update", label: "update — git pull the superpowers clone" },
+				{ value: "update", label: "update — upgrade the skills clone to the latest release" },
 			];
 			const filtered = items.filter((item) => item.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
@@ -126,6 +136,7 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			const hadClone = cloneExists();
 			if (!(await ensureClone(ctx))) return;
 
 			superpowersEnabled = true;
@@ -135,6 +146,11 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 			pi.appendEntry(CUSTOM_TYPE, { enabled: true, enabledAt: Date.now() });
 			updateStatus(ctx);
 			notify(ctx, "Superpowers enabled — discovering skills…", "info");
+			if (hadClone) {
+				// A fresh clone is already at the latest release; only a reused
+				// clone can be outdated. Non-blocking.
+				void checkForNewRelease(ctx);
+			}
 
 			// Re-run resource discovery so the skills become visible. The reload
 			// re-instantiates this extension; session_start then restores the
@@ -147,25 +163,49 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 	// --- helpers --------------------------------------------------------------
 
 	async function ensureClone(ctx: ExtensionCommandContext): Promise<boolean> {
-		if (existsSync(join(cloneDir, ".git"))) return true;
+		if (cloneExists()) return true;
 
 		notify(ctx, `Cloning ${SUPERPOWERS_REPO_URL} …`, "info");
+		const latest = await latestRemoteTag();
+		const tagArgs = latest ? ["--branch", latest.tag] : [];
 		try {
 			mkdirSync(dirname(cloneDir), { recursive: true });
-			const result = await pi.exec(
+
+			// Preferred: sparse checkout (skills/ only) of the latest release tag.
+			let ok = false;
+			const sparseClone = await pi.exec(
 				"git",
-				["clone", "--depth", "1", SUPERPOWERS_REPO_URL, cloneDir],
+				["clone", "--depth", "1", "--filter=blob:none", "--sparse", ...tagArgs, SUPERPOWERS_REPO_URL, cloneDir],
 				{ timeout: 180_000 },
 			);
-			if (result.code !== 0) {
-				notify(ctx, `git clone failed: ${truncate(result.stderr)}`, "error");
-				return false;
+			if (sparseClone.code === 0) {
+				const sparseSet = await pi.exec(
+					"git",
+					["-C", cloneDir, "sparse-checkout", "set", "skills"],
+					{ timeout: 60_000 },
+				);
+				ok = sparseSet.code === 0;
+			}
+
+			// Fallback for old git versions: plain shallow clone of the tag.
+			if (!ok) {
+				rmSync(cloneDir, { recursive: true, force: true });
+				const plainClone = await pi.exec(
+					"git",
+					["clone", "--depth", "1", ...tagArgs, SUPERPOWERS_REPO_URL, cloneDir],
+					{ timeout: 180_000 },
+				);
+				if (plainClone.code !== 0) {
+					notify(ctx, `git clone failed: ${truncate(plainClone.stderr)}`, "error");
+					return false;
+				}
 			}
 		} catch (error) {
 			notify(ctx, `git clone failed: ${String(error)}`, "error");
 			return false;
 		}
 
+		writeUpdateStamp(); // fresh clone is at the latest release, no need to re-check soon
 		if (!existsSync(bootstrapSkillPath)) {
 			notify(
 				ctx,
@@ -177,7 +217,7 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 	}
 
 	async function updateClone(ctx: ExtensionCommandContext): Promise<void> {
-		if (!existsSync(join(cloneDir, ".git"))) {
+		if (!cloneExists()) {
 			if (await ensureClone(ctx)) {
 				notify(ctx, "Superpowers clone created.", "info");
 			}
@@ -185,20 +225,116 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 		}
 
 		try {
-			const result = await pi.exec("git", ["-C", cloneDir, "pull", "--ff-only"], {
-				timeout: 180_000,
+			// Keep the worktree lean; also converts a legacy full clone to sparse.
+			await pi.exec("git", ["-C", cloneDir, "sparse-checkout", "set", "skills"], {
+				timeout: 60_000,
 			});
-			if (result.code !== 0) {
-				notify(ctx, `git pull failed: ${truncate(result.stderr)}`, "error");
+
+			const latest = await latestRemoteTag();
+			writeUpdateStamp();
+			if (!latest) {
+				notify(ctx, "Could not determine the latest superpowers release.", "warning");
 				return;
 			}
+
+			const current = await installedTag();
+			if (current === latest.tag) {
+				notify(ctx, `Superpowers are up to date (${latest.tag}).`, "info");
+				return;
+			}
+
+			const fetch = await pi.exec(
+				"git",
+				["-C", cloneDir, "fetch", "--depth", "1", "--force", "origin", `refs/tags/${latest.tag}:refs/tags/${latest.tag}`],
+				{ timeout: 180_000 },
+			);
+			if (fetch.code !== 0) {
+				notify(ctx, `git fetch failed: ${truncate(fetch.stderr)}`, "error");
+				return;
+			}
+
+			const checkout = await pi.exec(
+				"git",
+				["-C", cloneDir, "-c", "advice.detachedHead=false", "checkout", latest.tag],
+				{ timeout: 60_000 },
+			);
+			if (checkout.code !== 0) {
+				notify(ctx, `git checkout failed: ${truncate(checkout.stderr)}`, "error");
+				return;
+			}
+
 			cachedBootstrap = undefined; // re-read SKILL.md on next injection
-			notify(ctx, `Superpowers updated: ${truncate(result.stdout.trim())}`, "info");
+			notify(ctx, `Superpowers updated: ${current ?? "unknown"} → ${latest.tag}`, "info");
 			if (superpowersEnabled) {
 				await ctx.reload(); // refresh discovered skill metadata
 			}
 		} catch (error) {
-			notify(ctx, `git pull failed: ${String(error)}`, "error");
+			notify(ctx, `Update failed: ${String(error)}`, "error");
+		}
+	}
+
+	/** Latest release tag (vX.Y.Z) on the remote, or null when unreachable/none. */
+	async function latestRemoteTag(): Promise<{ tag: string } | null> {
+		try {
+			const result = await pi.exec("git", ["ls-remote", "--tags", SUPERPOWERS_REPO_URL], {
+				timeout: 30_000,
+			});
+			if (result.code !== 0) return null;
+			let best: { tag: string; version: readonly number[] } | null = null;
+			for (const line of result.stdout.split("\n")) {
+				const match = line.match(/refs\/tags\/(v\d+\.\d+\.\d+)(\^\{\})?\s*$/);
+				if (!match) continue;
+				const version = parseReleaseTag(match[1]);
+				if (!version) continue;
+				if (!best || isNewerVersion(version, best.version)) {
+					best = { tag: match[1], version };
+				}
+			}
+			return best ? { tag: best.tag } : null;
+		} catch {
+			return null;
+		}
+	}
+
+	/** Release tag the clone is currently at, or null (e.g. legacy clone on a branch tip). */
+	async function installedTag(): Promise<string | null> {
+		try {
+			const result = await pi.exec(
+				"git",
+				["-C", cloneDir, "describe", "--tags", "--exact-match", "HEAD"],
+				{ timeout: 15_000 },
+			);
+			if (result.code !== 0) return null;
+			const tag = result.stdout.trim();
+			return tag === "" ? null : tag;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * Notify (throttled to once per 24h, silent on failure) when a newer
+	 * superpowers release than the installed one is available.
+	 */
+	async function checkForNewRelease(ctx: ExtensionContext): Promise<void> {
+		try {
+			if (!updateStampExpired()) return;
+			writeUpdateStamp();
+			const latest = await latestRemoteTag();
+			if (!latest) return;
+			const current = await installedTag();
+			if (!current) return;
+			const latestVersion = parseReleaseTag(latest.tag);
+			const currentVersion = parseReleaseTag(current);
+			if (!latestVersion || !currentVersion) return;
+			if (!isNewerVersion(latestVersion, currentVersion)) return;
+			notify(
+				ctx,
+				`Superpowers ${latest.tag} is available (installed: ${current}). Run /superpowers update to upgrade.`,
+				"info",
+			);
+		} catch {
+			// offline etc. — stay silent
 		}
 	}
 
@@ -209,6 +345,41 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 }
 
 // --- module-level helpers (fork of upstream) ---------------------------------
+
+function cloneExists(): boolean {
+	return existsSync(join(cloneDir, ".git"));
+}
+
+function parseReleaseTag(tag: string): readonly number[] | null {
+	const match = tag.match(/^v(\d+)\.(\d+)\.(\d+)$/);
+	if (!match) return null;
+	return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function isNewerVersion(a: readonly number[], b: readonly number[]): boolean {
+	for (let i = 0; i < 3; i++) {
+		if (a[i] !== b[i]) return (a[i] ?? 0) > (b[i] ?? 0);
+	}
+	return false;
+}
+
+function updateStampExpired(): boolean {
+	try {
+		const ts = Number(readFileSync(updateStampPath, "utf8").trim());
+		return !Number.isFinite(ts) || Date.now() - ts > UPDATE_CHECK_INTERVAL_MS;
+	} catch {
+		return true;
+	}
+}
+
+function writeUpdateStamp(): void {
+	try {
+		mkdirSync(dirname(updateStampPath), { recursive: true });
+		writeFileSync(updateStampPath, String(Date.now()));
+	} catch {
+		// best effort
+	}
+}
 
 function readEnabledFromSession(ctx: ExtensionContext): boolean {
 	for (const entry of ctx.sessionManager.getBranch()) {

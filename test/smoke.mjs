@@ -55,8 +55,24 @@ const pi = {
   },
   registerCommand: (name, options) => commands.set(name, options),
   appendEntry: (customType, data) => appendedEntries.push({ customType, data }),
-  exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
+  exec: async (cmd, args) => {
+    const joined = args.join(" ");
+    if (joined.startsWith("ls-remote")) {
+      return {
+        stdout: "abc\trefs/tags/v6.1.1\nabc2\trefs/tags/v6.1.1^{}\ndef\trefs/tags/v9.9.9\ndef2\trefs/tags/v9.9.9^{}\n",
+        stderr: "",
+        code: 0,
+        killed: false,
+      };
+    }
+    if (joined.includes("describe")) {
+      return { stdout: "v6.1.1\n", stderr: "", code: 0, killed: false };
+    }
+    return { stdout: "", stderr: "", code: 0, killed: false };
+  },
 };
+
+const flushAsync = () => new Promise((resolve) => setTimeout(resolve, 50));
 
 async function emit(event, payload) {
   const results = [];
@@ -82,11 +98,18 @@ assert.deepStrictEqual(discover, [undefined], "no skillPaths before activation")
 let contextResult = await emit("context", { messages: [{ role: "user", content: "hi" }] });
 assert.deepStrictEqual(contextResult, [undefined], "no bootstrap before activation");
 
-// 3. run /superpowers
+// 3. run /superpowers (clone pre-exists -> triggers release check)
 await commands.get("superpowers").handler("", ctx);
 assert.strictEqual(reloadCount, 1, "reload triggered after activation");
 assert.strictEqual(appendedEntries.length, 1, "state persisted to session");
 assert.strictEqual(appendedEntries[0].data.enabled, true);
+
+// 3b. release check: mock remote has v9.9.9, installed is v6.1.1 -> update notice
+await flushAsync();
+assert.ok(
+  notifications.some((n) => n.msg.includes("v9.9.9") && n.msg.includes("/superpowers update")),
+  "update-available notification shown",
+);
 
 // 4. after activation -> skills discovered + bootstrap injected
 discover = await emit("resources_discover", { cwd: ctx.cwd, reason: "reload" });
@@ -113,11 +136,17 @@ await commands.get("superpowers").handler("", ctx);
 assert.strictEqual(appendedEntries.length, 1, "no duplicate entry");
 assert.ok(notifications.some((n) => n.msg.includes("already enabled")), "already-enabled notice");
 
-// 7. /resume with persisted entry -> enabled again
+// 7. /resume with persisted entry -> enabled again; release check is throttled (stamp is fresh)
+notifications.length = 0;
 sessionEntries = [{ type: "custom", customType: "toogle-superpowers", data: { enabled: true } }];
 await emit("session_start", { reason: "resume" });
+await flushAsync();
 discover = await emit("resources_discover", { cwd: ctx.cwd, reason: "startup" });
 assert.ok(discover[0]?.skillPaths, "resume restores enabled state");
+assert.ok(
+  !notifications.some((n) => n.msg.includes("v9.9.9")),
+  "release check throttled within 24h",
+);
 
 // 8. /new -> empty session -> flag resets to false
 sessionEntries = [];
