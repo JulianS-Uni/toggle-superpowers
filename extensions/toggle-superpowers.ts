@@ -1,4 +1,4 @@
-// toogle-superpowers — a gated fork of obra/superpowers' pi extension.
+// toggle-superpowers — a gated fork of obra/superpowers' pi extension.
 //
 // Upstream: https://github.com/obra/superpowers/blob/main/.pi/extensions/superpowers.ts
 //
@@ -8,11 +8,12 @@
 //   so pi cannot see or load the superpowers skills before activation.
 // - The using-superpowers bootstrap injection is guarded by the same flag.
 // - Registers a `/superpowers` command that clones obra/superpowers on first
-//   use (into ~/.pi/agent/toogle-superpowers/superpowers), enables the flag,
+//   use (into ~/.pi/agent/toggle-superpowers/superpowers), enables the flag,
 //   persists that decision into the session, and reloads resources so the
 //   skills get discovered.
-// - The clone is a sparse checkout (skills/ only, blob:none partial clone)
-//   pinned to the latest release tag (vX.Y.Z) instead of main.
+// - The clone is a strict sparse checkout (skills/ plus LICENSE and
+//   RELEASE-NOTES.md only, blob:none partial clone) pinned to the latest
+//   release tag (vX.Y.Z) instead of main.
 // - When a newer release is published, the extension notifies (at most once
 //   per 24h, non-blocking) that `/superpowers update` can upgrade the skills.
 // - There is deliberately no off-switch: the flag persists for the lifetime
@@ -28,20 +29,20 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-const CUSTOM_TYPE = "toogle-superpowers";
+const CUSTOM_TYPE = "toggle-superpowers";
 const SUPERPOWERS_REPO_URL = "https://github.com/obra/superpowers.git";
 const EXTREMELY_IMPORTANT_MARKER = "<EXTREMELY_IMPORTANT>";
 const BOOTSTRAP_MARKER = "superpowers:using-superpowers bootstrap for pi";
 
-const cloneDir = join(getAgentDir(), "toogle-superpowers", "superpowers");
+const cloneDir = join(getAgentDir(), "toggle-superpowers", "superpowers");
 const skillsDir = join(cloneDir, "skills");
 const bootstrapSkillPath = join(skillsDir, "using-superpowers", "SKILL.md");
-const updateStampPath = join(getAgentDir(), "toogle-superpowers", "last-update-check");
+const updateStampPath = join(getAgentDir(), "toggle-superpowers", "last-update-check");
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 let cachedBootstrap: string | undefined;
 
-export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
+export default function toggleSuperpowersExtension(pi: ExtensionAPI) {
 	/**
 	 * Master switch. Default: false — pi must neither see the superpowers
 	 * skills nor receive the bootstrap until /superpowers has been run in
@@ -171,7 +172,7 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 		try {
 			mkdirSync(dirname(cloneDir), { recursive: true });
 
-			// Preferred: sparse checkout (skills/ only) of the latest release tag.
+			// Preferred: strict sparse checkout (skills/ + LICENSE + RELEASE-NOTES.md only) of the latest release tag.
 			let ok = false;
 			const sparseClone = await pi.exec(
 				"git",
@@ -179,12 +180,7 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 				{ timeout: 180_000 },
 			);
 			if (sparseClone.code === 0) {
-				const sparseSet = await pi.exec(
-					"git",
-					["-C", cloneDir, "sparse-checkout", "set", "skills"],
-					{ timeout: 60_000 },
-				);
-				ok = sparseSet.code === 0;
+				ok = await configureStrictSparseCheckout();
 			}
 
 			// Fallback for old git versions: plain shallow clone of the tag.
@@ -225,10 +221,8 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 		}
 
 		try {
-			// Keep the worktree lean; also converts a legacy full clone to sparse.
-			await pi.exec("git", ["-C", cloneDir, "sparse-checkout", "set", "skills"], {
-				timeout: 60_000,
-			});
+			// Keep the worktree lean; also converts a legacy full clone to strict sparse.
+			await configureStrictSparseCheckout();
 
 			const latest = await latestRemoteTag();
 			writeUpdateStamp();
@@ -274,6 +268,24 @@ export default function toogleSuperpowersExtension(pi: ExtensionAPI) {
 	}
 
 	/** Latest release tag (vX.Y.Z) on the remote, or null when unreachable/none. */
+	async function configureStrictSparseCheckout(): Promise<boolean> {
+		const sparseSet = await pi.exec(
+			"git",
+			[
+				"-C",
+				cloneDir,
+				"sparse-checkout",
+				"set",
+				"--no-cone",
+				"/skills/",
+				"/LICENSE",
+				"/RELEASE-NOTES.md",
+			],
+			{ timeout: 60_000 },
+		);
+		return sparseSet.code === 0;
+	}
+
 	async function latestRemoteTag(): Promise<{ tag: string } | null> {
 		try {
 			const result = await pi.exec("git", ["ls-remote", "--tags", SUPERPOWERS_REPO_URL], {

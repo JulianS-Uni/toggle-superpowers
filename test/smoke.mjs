@@ -10,9 +10,9 @@ import { tmpdir } from "node:os";
 import assert from "node:assert";
 
 // --- fake agent dir with a pre-seeded "clone" --------------------------------
-const fakeAgentDir = join(tmpdir(), `toogle-sp-test-${process.pid}`);
+const fakeAgentDir = join(tmpdir(), `toggle-sp-test-${process.pid}`);
 process.env.PI_CODING_AGENT_DIR = fakeAgentDir;
-const cloneDir = join(fakeAgentDir, "toogle-superpowers", "superpowers");
+const cloneDir = join(fakeAgentDir, "toggle-superpowers", "superpowers");
 mkdirSync(join(cloneDir, ".git"), { recursive: true });
 const skillDir = join(cloneDir, "skills", "using-superpowers");
 mkdirSync(skillDir, { recursive: true });
@@ -28,6 +28,7 @@ const appendedEntries = [];
 let sessionEntries = [];
 let reloadCount = 0;
 const notifications = [];
+const execCalls = [];
 
 const ctx = {
   hasUI: true,
@@ -56,6 +57,7 @@ const pi = {
   registerCommand: (name, options) => commands.set(name, options),
   appendEntry: (customType, data) => appendedEntries.push({ customType, data }),
   exec: async (cmd, args) => {
+    execCalls.push({ cmd, args: [...args] });
     const joined = args.join(" ");
     if (joined.startsWith("ls-remote")) {
       return {
@@ -84,7 +86,7 @@ async function emit(event, payload) {
 
 // --- load extension -------------------------------------------------------------
 const jiti = createJiti(import.meta.url, { interopDefault: true });
-const factory = await jiti.import("../extensions/toogle-superpowers.ts", { default: true });
+const factory = await jiti.import("../extensions/toggle-superpowers.ts", { default: true });
 factory(pi);
 
 // 1. command registered
@@ -136,9 +138,21 @@ await commands.get("superpowers").handler("", ctx);
 assert.strictEqual(appendedEntries.length, 1, "no duplicate entry");
 assert.ok(notifications.some((n) => n.msg.includes("already enabled")), "already-enabled notice");
 
-// 7. /resume with persisted entry -> enabled again; release check is throttled (stamp is fresh)
+// 7. /superpowers update keeps the checkout strict-sparse (skills + LICENSE + RELEASE-NOTES.md only)
+execCalls.length = 0;
+await commands.get("superpowers").handler("update", ctx);
+assert.ok(
+  execCalls.some(
+    ({ cmd, args }) =>
+      cmd === "git" &&
+      args.join(" ") === `-C ${cloneDir} sparse-checkout set --no-cone /skills/ /LICENSE /RELEASE-NOTES.md`,
+  ),
+  "update re-applies strict sparse-checkout incl. release notes",
+);
+
+// 8. /resume with persisted entry -> enabled again; release check is throttled (stamp is fresh)
 notifications.length = 0;
-sessionEntries = [{ type: "custom", customType: "toogle-superpowers", data: { enabled: true } }];
+sessionEntries = [{ type: "custom", customType: "toggle-superpowers", data: { enabled: true } }];
 await emit("session_start", { reason: "resume" });
 await flushAsync();
 discover = await emit("resources_discover", { cwd: ctx.cwd, reason: "startup" });
@@ -148,7 +162,7 @@ assert.ok(
   "release check throttled within 24h",
 );
 
-// 8. /new -> empty session -> flag resets to false
+// 9. /new -> empty session -> flag resets to false
 sessionEntries = [];
 await emit("session_start", { reason: "new" });
 discover = await emit("resources_discover", { cwd: ctx.cwd, reason: "startup" });

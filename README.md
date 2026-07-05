@@ -1,4 +1,4 @@
-# toogle-superpowers
+# toggle-superpowers
 
 A [pi](https://github.com/earendil-works/pi-mono) extension that puts
 [obra/superpowers](https://github.com/obra/superpowers) behind an explicit
@@ -14,9 +14,9 @@ gates both skill discovery and the `using-superpowers` bootstrap injection.
 - **Before `/superpowers`:** pi does not see or load any superpowers skills,
   and no bootstrap context is injected. Zero context overhead.
 - **`/superpowers`:**
-  1. On first use, creates a lean sparse checkout (`skills/` only,
-     `--filter=blob:none`) of the **latest release tag** of obra/superpowers
-     at `~/.pi/agent/toogle-superpowers/superpowers` (reused afterwards; falls
+  1. On first use, creates a lean sparse checkout (`skills/` plus `LICENSE`
+     and `RELEASE-NOTES.md`, `--filter=blob:none`) of the **latest release tag** of obra/superpowers
+     at `~/.pi/agent/toggle-superpowers/superpowers` (reused afterwards; falls
      back to a plain shallow clone on old git versions).
   2. Sets `superpowersEnabled = true` and persists that decision into the
      current session.
@@ -38,19 +38,19 @@ gates both skill discovery and the `using-superpowers` bootstrap injection.
 ## Install
 
 ```bash
-pi install git:github.com/JulianS-Uni/toogle-superpowers
+pi install git:github.com/JulianS-Uni/toggle-superpowers
 ```
 
 or, once published to npm:
 
 ```bash
-pi install npm:toogle-superpowers
+pi install npm:toggle-superpowers
 ```
 
 For local development, load the checkout directly:
 
 ```bash
-pi -e /path/to/toogle-superpowers/extensions/toogle-superpowers.ts
+pi -e /path/to/toggle-superpowers/extensions/toggle-superpowers.ts
 ```
 
 > **Note:** don't install this alongside the upstream `obra/superpowers` pi

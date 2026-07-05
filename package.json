@@ -1,5 +1,5 @@
 {
-  "name": "toogle-superpowers",
+  "name": "toggle-superpowers",
   "version": "0.1.0",
   "description": "Pi extension that gates obra/superpowers behind a /superpowers slash command: skills are discovered and the using-superpowers bootstrap is injected only after activation.",
   "type": "module",
@@ -12,11 +12,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JulianS-Uni/toogle-superpowers.git"
+    "url": "git+https://github.com/JulianS-Uni/toggle-superpowers.git"
   },
   "pi": {
     "extensions": [
-      "./extensions/toogle-superpowers.ts"
+      "./extensions/toggle-superpowers.ts"
     ]
   },
   "peerDependencies": {
